@@ -4,144 +4,154 @@ param(
     [ValidateSet('Dev','Test','Prod')][string]$Env,
     [string]$PodId,
     [string]$User,
-    [String]$Password
+    [String]$Password,
+    [string]$PackageSubPath,
+    [string]$FileMappings,
+    [string]$BackupDir = 'D:\Apps\Backup_exe'
 )
 
 $ScriptDirectory = Split-Path -Path $MyInvocation.MyCommand.Definition -Parent
 try {
-    write-host "$ScriptDirectory\shared_functions.ps1"
     . ("$ScriptDirectory\shared_functions.ps1")
-    
 }catch{
-    write-host "Import of shared_functions.ps1 failed!"
+    Write-Host "Import of shared_functions.ps1 failed!"
+}
+
+function Parse-FileMappings {
+    param([string]$Mappings)
+
+    if ([string]::IsNullOrWhiteSpace($Mappings)) { return @() }
+
+    $parsed = @()
+    foreach ($entry in ($Mappings -split ';')) {
+        $trimmed = $entry.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+
+        $parts = $trimmed -split '\|', 2
+        if ($parts.Count -ne 2 -or [string]::IsNullOrWhiteSpace($parts[0]) -or [string]::IsNullOrWhiteSpace($parts[1])) {
+            throw "Invalid mapping format '$trimmed'. Use: sourceFileName|fullDestinationPath"
+        }
+
+        $parsed += [PSCustomObject]@{
+            SourceFileName = $parts[0].Trim()
+            DestinationPath = $parts[1].Trim()
+        }
+    }
+
+    return $parsed
 }
 
 $SecurePassword = $Password | ConvertTo-SecureString -AsPlainText -Force
 $Credentials = New-Object System.Management.Automation.PSCredential -ArgumentList $User, $SecurePassword
 
 switch ($Env) {
-    'Prod' { 
+    'Prod' {
         $domain = '.cloud.trintech.host'
-        $packageShare = "\\cloud\NETLOGON\cloud_files\Frontier\Frontier_Release\2025_1\Frontier Install Packages\RDP\"
+        $packageShareBase = '\\cloud\NETLOGON\cloud_files'
     }
     'Test' {
         $domain = '.cloud.trintech.host'
-        $packageShare = "\\cloud\NETLOGON\cloud_files\Frontier\Frontier_Release\2025_1\Frontier Install Packages\RDP\"
+        $packageShareBase = '\\cloud\NETLOGON\cloud_files'
     }
     'Dev' {
         $domain = '.lower.trintech.host'
-        $packageShare = "\\Lower\NETLOGON\cloud_files\Frontier\Frontier_Release\2025_1\Frontier Install Packages\RDP\"
+        $packageShareBase = '\\Lower\NETLOGON\cloud_files'
     }
     default { throw "Selected environment type doesn't exist!" }
 }
 
-$webServer1 = $Region + $EnvPrefix + 'DWEB-' + $PodId + '01' + $domain
-$webServer2 = $Region + $EnvPrefix + 'DWEB-' + $PodId + '02' + $domain
-$servers = @($webServer1, $webServer2)
+if ([string]::IsNullOrWhiteSpace($PackageSubPath)) {
+    throw 'PackageSubPath is required.'
+}
 
-Write-Host "`nServers:"
-$servers | ForEach-Object { Write-Host $_ }
+$packageShare = Join-Path $packageShareBase $PackageSubPath
+$fileMap = Parse-FileMappings -Mappings $FileMappings
 
-$BackupDir = "D:\apps\Backup_exe"
+if (-not $fileMap -or $fileMap.Count -eq 0) {
+    Write-Warning 'No file mappings provided for WEB. Skipping deployment.'
+    exit 0
+}
 
-# Destinations
-$DestRecolectExe = "D:\apps\Frontier\Rpswin\recolect.exe"
-$DestMidTierExe  = "D:\apps\Frontier\midtier\updatereportdefs.exe"
+$servers = @(
+    ($Region + $EnvPrefix + 'DWEB-' + $PodId + '01' + $domain),
+    ($Region + $EnvPrefix + 'DWEB-' + $PodId + '02' + $domain)
+)
 
-# Sources
-$SourceRecolectExe = Join-Path $packageShare "recolect.exe"
-$SourceMidTierExe  = Join-Path $packageShare "updatereportdefs.exe"
+Write-Host "Servers: $($servers -join ', ')"
+Write-Host "Package Share: $packageShare"
 
-# Validate sources locally
-if (-not (Test-Path -LiteralPath $SourceRecolectExe)) { throw "Source exe not found on share: $SourceRecolectExe" }
-if (-not (Test-Path -LiteralPath $SourceMidTierExe))  { throw "Source exe not found on share: $SourceMidTierExe" }
+$resolvedMap = @()
+foreach ($item in $fileMap) {
+    $sourceFile = Join-Path $packageShare $item.SourceFileName
+    if (-not (Test-Path -LiteralPath $sourceFile)) {
+        throw "Source file not found on share: $sourceFile"
+    }
+
+    $resolvedMap += [PSCustomObject]@{
+        SourcePath = $sourceFile
+        DestinationPath = $item.DestinationPath
+    }
+}
 
 foreach ($server in $servers) {
-    Write-Host "`n==== Updating EXEs on $server ===="
+    Write-Host "`n==== Deploying files on $server ===="
 
     try {
-        Invoke-Command -ComputerName $server `
-            -Credential $Credentials `
-            -Authentication CredSSP `
-            -UseSSL `
-            -ArgumentList $SourceRecolectExe, $DestRecolectExe, $SourceMidTierExe, $DestMidTierExe, $BackupDir `
-            -ErrorAction Stop `
-            -ScriptBlock {
+        Invoke-Command -ComputerName $server -Credential $Credentials -Authentication CredSSP -UseSSL -ArgumentList $resolvedMap, $BackupDir -ErrorAction Stop -ScriptBlock {
+            param(
+                [object[]]$ResolvedMap,
+                [string]$BackupDir
+            )
 
-                param(
-                    [string]$SourceRecolectExe,
-                    [string]$DestRecolectExe,
-                    [string]$SourceMidTierExe,
-                    [string]$DestMidTierExe,
-                    [string]$BackupDir
-                )
-
-                function Write-Log($msg) {
-                    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                    Write-Host "[$env:COMPUTERNAME][$ts] $msg"
-                }
-
-                function ReplaceExeWithBackupAndHash {
-                    param(
-                        [string]$SourceExe,
-                        [string]$DestExe,
-                        [string]$BackupDir
-                    )
-
-                    Write-Log "Source: $SourceExe"
-                    Write-Log "Dest:   $DestExe"
-
-                    if (-not (Test-Path -LiteralPath $SourceExe)) { throw "Source not accessible: $SourceExe" }
-                    if (-not (Test-Path -LiteralPath $DestExe))   { throw "Destination not found: $DestExe" }
-
-                    # Stop process if running (best-effort)
-                    $procName = [IO.Path]::GetFileNameWithoutExtension($DestExe)
-                    $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
-                    if ($procs) {
-                        Write-Log "Stopping process: $procName"
-                        $procs | Stop-Process -Force
-                        Start-Sleep -Seconds 2
-                    }
-
-                    if (-not (Test-Path -LiteralPath $BackupDir)) {
-                        New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
-                        Write-Log "Created backup dir: $BackupDir"
-                    }
-
-                    $timestamp  = Get-Date -Format "yyyyMMdd_HHmmss"
-                    $destName   = [IO.Path]::GetFileName($DestExe)
-                    $backupPath = Join-Path $BackupDir "$destName.$timestamp.bak"
-
-                    Write-Log "Backing up -> $backupPath"
-                    Copy-Item -LiteralPath $DestExe -Destination $backupPath -Force -ErrorAction Stop
-
-                    $srcHash = (Get-FileHash -LiteralPath $SourceExe -Algorithm SHA256).Hash
-                    Write-Log "SHA256 source: $srcHash"
-
-                    Write-Log "Copying new EXE..."
-                    Copy-Item -LiteralPath $SourceExe -Destination $DestExe -Force -ErrorAction Stop
-
-                    $dstHash = (Get-FileHash -LiteralPath $DestExe -Algorithm SHA256).Hash
-                    Write-Log "SHA256 dest:   $dstHash"
-
-                    if ($dstHash -ne $srcHash) {
-                        throw "Hash verification failed for $DestExe"
-                    }
-
-                    Write-Log "Updated successfully: $DestExe"
-                }
-
-                # Replace recolect.exe
-                #ReplaceExeWithBackupAndHash -SourceExe $SourceRecolectExe -DestExe $DestRecolectExe -BackupDir $BackupDir
-
-                # Replace MidTier updatereportdefs.exe
-                ReplaceExeWithBackupAndHash -SourceExe $SourceMidTierExe -DestExe $DestMidTierExe -BackupDir $BackupDir
+            function Write-Log($msg) {
+                $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                Write-Host "[$env:COMPUTERNAME][$ts] $msg"
             }
+
+            foreach ($file in $ResolvedMap) {
+                $source = $file.SourcePath
+                $dest = $file.DestinationPath
+
+                Write-Log "Source: $source"
+                Write-Log "Dest:   $dest"
+
+                if (-not (Test-Path -LiteralPath $source)) { throw "Source not accessible: $source" }
+                if (-not (Test-Path -LiteralPath $dest))   { throw "Destination not found: $dest" }
+
+                $procName = [IO.Path]::GetFileNameWithoutExtension($dest)
+                $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
+                if ($procs) {
+                    Write-Log "Stopping process: $procName"
+                    $procs | Stop-Process -Force
+                    Start-Sleep -Seconds 2
+                }
+
+                if (-not (Test-Path -LiteralPath $BackupDir)) {
+                    New-Item -ItemType Directory -Path $BackupDir -Force | Out-Null
+                    Write-Log "Created backup dir: $BackupDir"
+                }
+
+                $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+                $destName = [IO.Path]::GetFileName($dest)
+                $backupPath = Join-Path $BackupDir "$destName.$timestamp.bak"
+
+                Copy-Item -LiteralPath $dest -Destination $backupPath -Force -ErrorAction Stop
+
+                $srcHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+                Copy-Item -LiteralPath $source -Destination $dest -Force -ErrorAction Stop
+                $dstHash = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
+
+                if ($dstHash -ne $srcHash) {
+                    throw "Hash verification failed for $dest"
+                }
+
+                Write-Log "Updated successfully: $dest"
+            }
+        }
 
         Write-Host "Done on $server"
     }
     catch {
         Write-Host "Failed on $server : $($_.Exception.Message)"
-        continue
     }
 }
