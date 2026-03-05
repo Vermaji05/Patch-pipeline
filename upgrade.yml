@@ -1,0 +1,175 @@
+name: "$(Build.DefinitionName)-${{ parameters.PODId }}-${{ parameters.InputEnvironment }}-$(Date:yyyyMMdd)"
+trigger: none
+parameters:
+  - name: PoolName
+    type: string
+    default: "USR2_Frontier_Lower"
+    displayName: Release agent pool
+    values:
+      - USR2_Frontier_Lower
+      - USR2_Frontier_Cloud
+      - USR1_Frontier_Cloud
+      - AUA1_Frontier_Cloud
+      - AUA2_Frontier_Cloud
+      - DEA1_Frontier_Cloud
+      - DEA2_Frontier_Cloud
+      - UKR1_Frontier_Cloud
+      - UKR2_Frontier_Cloud
+  - name: InputEnvironment
+    type: string
+    default: "Dev"
+    values:
+      - Dev
+      - Test
+      - Prod
+  - name: PODId
+    type: string
+    values:
+      - "01"
+      - "02"
+      - "03"
+      - "04"
+      - "05"
+      - "06"
+      - "07"
+      - "08"
+      - "09"
+      - "10"
+      - "11"
+      - "12"
+      - "13"
+      - "14"
+      - "15"
+      - "17"
+      - "18"
+      - "19"
+      - "26"
+      - "99"
+  - name: DoStopServices
+    type: boolean
+    default: true
+
+  - name: DoDeployRdp
+    type: boolean
+    default: true
+
+  - name: DoDeployWeb
+    type: boolean
+    default: true
+
+  - name: DoDeployBatch
+    type: boolean
+    default: true
+
+  - name: DoStartServices
+    type: boolean
+    default: true    
+
+variables:
+  - name: KeyVault
+    ${{ if eq(parameters.PoolName, 'USR2_Frontier_Lower') }}:
+      value: 'TrintechITKeyVault'
+    ${{ if or(or(or(or(eq(parameters.PoolName, 'USR1_Frontier_Cloud'), eq(parameters.PoolName, 'USR2_Frontier_Cloud')), or(eq(parameters.PoolName, 'AUA1_Frontier_Cloud'), eq(parameters.PoolName, 'AUA2_Frontier_Cloud'))), or(eq(parameters.PoolName, 'DEA1_Frontier_Cloud'), eq(parameters.PoolName, 'DEA2_Frontier_Cloud'))), or(eq(parameters.PoolName, 'UKR1_Frontier_Cloud'), eq(parameters.PoolName, 'UKR2_Frontier_Cloud'))) }}:
+      value: 'CICD-Secrets'
+  - name: keyVaultParameters
+    ${{ if eq(parameters.PoolName, 'USR2_Frontier_Lower') }}:
+      value: 'Lower-KeyvaultParameters'
+    ${{ if or(or(or(or(eq(parameters.PoolName, 'USR1_Frontier_Cloud'), eq(parameters.PoolName, 'USR2_Frontier_Cloud')), or(eq(parameters.PoolName, 'AUA1_Frontier_Cloud'), eq(parameters.PoolName, 'AUA2_Frontier_Cloud'))), or(eq(parameters.PoolName, 'DEA1_Frontier_Cloud'), eq(parameters.PoolName, 'DEA2_Frontier_Cloud'))), or(eq(parameters.PoolName, 'UKR1_Frontier_Cloud'), eq(parameters.PoolName, 'UKR2_Frontier_Cloud'))) }}:
+      value: 'Cloud-KeyvaultParameters'
+  - name: springConfigServerUrl
+    ${{ if eq(parameters.PoolName, 'USR2_Frontier_Lower') }}:
+      value: 'http://10.72.73.33:8888'
+    ${{ if eq(parameters.PoolName, 'USR1_Frontier_Cloud') }}:
+      value: 'http://10.71.73.48:8888'   
+    ${{ if eq(parameters.PoolName, 'USR2_Frontier_Cloud') }}:
+      value: 'http://10.72.169.36:8888'
+    ${{ if eq(parameters.PoolName, 'AUA2_Frontier_Cloud') }}:
+      value: 'http://10.72.169.36:8888'
+    ${{ if eq(parameters.PoolName, 'DEA2_Frontier_Cloud') }}:
+      value: 'http://10.72.169.36:8888'
+    ${{ if eq(parameters.PoolName, 'UKR2_Frontier_Cloud') }}:
+      value: 'http://10.72.169.36:8888'
+    ${{ if eq(parameters.PoolName, 'UKR1_Frontier_Cloud') }}:
+      value: 'http://10.71.73.48:8888'
+    ${{ if eq(parameters.PoolName, 'DEA1_Frontier_Cloud') }}:
+      value: 'http://10.71.73.48:8888'
+    ${{ if eq(parameters.PoolName, 'AUA1_Frontier_Cloud') }}:
+      value: 'http://10.71.73.48:8888'
+  - name: region
+    ${{ if eq(parameters.PoolName, 'USR2_Frontier_Lower') }}:
+      value: 'USR2'
+    ${{ if eq(parameters.PoolName, 'USR2_Frontier_Cloud') }}:
+      value: 'USR2'
+    ${{ if eq(parameters.PoolName, 'USR1_Frontier_Cloud') }}:
+      value: 'USR1'
+    ${{ if eq(parameters.PoolName, 'AUA2_Frontier_Cloud') }}:
+      value: 'AUA2'
+    ${{ if eq(parameters.PoolName, 'DEA2_Frontier_Cloud') }}:
+      value: 'DEA2'
+    ${{ if eq(parameters.PoolName, 'UKR2_Frontier_Cloud') }}:
+      value: 'UKR2'
+    ${{ if eq(parameters.PoolName, 'UKR1_Frontier_Cloud') }}:
+      value: 'UKR1'
+    ${{ if eq(parameters.PoolName, 'DEA1_Frontier_Cloud') }}:
+      value: 'DEA1'
+    ${{ if eq(parameters.PoolName, 'AUA1_Frontier_Cloud') }}:
+      value: 'AUA1'
+  - name: envprefix
+    ${{ if eq(parameters.InputEnvironment, 'Dev') }}:
+      value: 'LF'
+    ${{ if eq(parameters.InputEnvironment, 'Prod') }}:
+      value: 'CF'
+    ${{ if eq(parameters.InputEnvironment, 'Test') }}:
+      value: 'CF'
+
+jobs:
+  - job: all
+    pool: ${{ parameters.PoolName }}
+    variables:
+      - group: ${{ variables.keyVaultParameters }}
+      - name: KV
+        value: ${{ variables.KeyVault }}
+    steps:
+      - powershell: |
+          d:/apps/spring_cloud_pipeline_client/bin/SpringCloudPipelineClient.exe --Dir  $(System.DefaultWorkingDirectory) --Uri ${{ variables.springConfigServerUrl }} --Name frontier --Env templates  --Label main --Username user  --Password password  --VaultName ${{ variables.KeyVault }} --TenantId a6990654-25eb-4d90-9f25-a558d2bf582f  --ClientId  $(KeyVault.ClientId)  --ClientSecret $(KeyVault.ClientSecret) --Envvariables Common.* --Verbose
+        displayName: Read variables from ${{variables.springConfigServerUrl}} 
+      - task: PowerShell@2
+        condition: and(succeeded(), eq(${{ parameters.DoStopServices }}, true))
+        displayName: 'Stopping all services on ${{ parameters.PODId }}'
+        inputs:
+          targetType: filePath
+          filePath: $(System.DefaultWorkingDirectory)/ps_script/Stop-Service.ps1
+          arguments: '-user $(Admin.Username) -password ''$(Admin.Password)'' -region ${{ variables.region }} -envprefix ${{ variables.envprefix }} -env ${{ parameters.InputEnvironment }} -PodId ''${{ parameters.PODId }}'''
+      
+      - task: PowerShell@2
+        condition: and(succeeded(), eq(${{ parameters.DoDeployRdp }}, true))
+        displayName: 'deploy new code binaries on RDP ${{ parameters.PODId }}'
+        inputs:
+          targetType: filePath
+          filePath: $(System.DefaultWorkingDirectory)/ps_script/Install-Binaries-RDP.ps1
+          arguments: '-user $(Admin.Username) -password ''$(Admin.Password)'' -region ${{ variables.region }} -envprefix ${{ variables.envprefix }} -env ${{ parameters.InputEnvironment }} -PodId ''${{ parameters.PODId }}'''
+
+      - task: PowerShell@2
+        condition: and(succeeded(), eq(${{ parameters.DoDeployWeb }}, true))
+        displayName: 'deploy new code binaries on web ${{ parameters.PODId }}'
+        inputs:
+          targetType: filePath
+          filePath: $(System.DefaultWorkingDirectory)/ps_script/Install-Binaries-WEB.ps1
+          arguments: '-user $(Admin.Username) -password ''$(Admin.Password)'' -region ${{ variables.region }} -envprefix ${{ variables.envprefix }} -env ${{ parameters.InputEnvironment }} -PodId ''${{ parameters.PODId }}''' 
+      
+      - task: PowerShell@2
+        condition: and(succeeded(), eq(${{ parameters.DoDeployBatch }}, true))
+        displayName: 'deploy new code binaries on batch ${{ parameters.PODId }}'
+        inputs:
+          targetType: filePath
+          filePath: $(System.DefaultWorkingDirectory)/ps_script/Install-Binaries-BAT.ps1
+          arguments: '-user $(Admin.Username) -password ''$(Admin.Password)'' -region ${{ variables.region }} -envprefix ${{ variables.envprefix }} -env ${{ parameters.InputEnvironment }} -PodId ''${{ parameters.PODId }}'''     
+      
+      - task: PowerShell@2
+        condition: and(succeeded(), eq(${{ parameters.DoStartServices }}, true))
+        displayName: 'Starting all services on ${{ parameters.PODId }}'
+        inputs:
+          targetType: filePath
+          filePath: $(System.DefaultWorkingDirectory)/ps_script/Start-Service.ps1
+          arguments: '-user $(Admin.Username) -password ''$(Admin.Password)'' -region ${{ variables.region }} -envprefix ${{ variables.envprefix }} -env ${{ parameters.InputEnvironment }} -PodId ''${{ parameters.PODId }}'''    
+      
