@@ -4,80 +4,116 @@ param(
     [ValidateSet('Dev','Test','Prod')][string]$Env,
     [string]$PodId,
     [string]$User,
-    [String]$Password
+    [String]$Password,
+    [string]$PackageSubPath,
+    [string]$FileMappings,
+    [string]$BackupDir = 'D:\Apps\Backup_exe'
 )
 
 $ScriptDirectory = Split-Path -Path $MyInvocation.MyCommand.Definition -Parent
 try {
-    write-host "$ScriptDirectory\shared_functions.ps1"
     . ("$ScriptDirectory\shared_functions.ps1")
-    
 }catch{
-    write-host "Import of shared_functions.ps1 failed!"
+    Write-Host "Import of shared_functions.ps1 failed!"
+}
+
+function Parse-FileMappings {
+    param([string]$Mappings)
+
+    if ([string]::IsNullOrWhiteSpace($Mappings)) { return @() }
+
+    if ($Mappings.Trim().ToUpperInvariant() -in @('SKIP','NONE','N/A','NA')) { return @() }
+
+    $parsed = @()
+    foreach ($entry in ($Mappings -split ';')) {
+        $trimmed = $entry.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+
+        $parts = $trimmed -split '\|', 2
+        if ($parts.Count -ne 2 -or [string]::IsNullOrWhiteSpace($parts[0]) -or [string]::IsNullOrWhiteSpace($parts[1])) {
+            throw "Invalid mapping format '$trimmed'. Use: sourceFileName|fullDestinationPath"
+        }
+
+        $parsed += [PSCustomObject]@{
+            SourceFileName = $parts[0].Trim()
+            DestinationPath = $parts[1].Trim()
+        }
+    }
+
+    return $parsed
 }
 
 $SecurePassword = $Password | ConvertTo-SecureString -AsPlainText -Force
 $Credentials = New-Object System.Management.Automation.PSCredential -ArgumentList $User, $SecurePassword
 
 switch ($Env) {
-    'Prod' { 
+    'Prod' {
         $domain = '.cloud.trintech.host'
-        $packageShare = "\\cloud\NETLOGON\cloud_files\Frontier\Frontier_Release\2025_1\Frontier Install Packages\RDP\"
+        $packageShareBase = '\\cloud\NETLOGON\cloud_files'
     }
     'Test' {
         $domain = '.cloud.trintech.host'
-        $packageShare = "\\cloud\NETLOGON\cloud_files\Frontier\Frontier_Release\2025_1\Frontier Install Packages\RDP\"
+        $packageShareBase = '\\cloud\NETLOGON\cloud_files'
     }
     'Dev' {
         $domain = '.lower.trintech.host'
-        $packageShare = "\\Lower\NETLOGON\cloud_files\Frontier\Frontier_Release\2025_1\Frontier Install Packages\RDP\"
+        $packageShareBase = '\\Lower\NETLOGON\cloud_files'
     }
     default { throw "Selected environment type doesn't exist!" }
 }
 
-$batServer = $Region + $EnvPrefix + 'TBAT-' + $PodId + '01' + $domain
-Write-Host "`nBatch Server: $batServer"
-
-$TargetExePath = "D:\apps\Frontier\Rpswin\recolect.exe"
-$BackupDir     = "D:\apps\Backup_exe"
-$NewExeSource  = Join-Path $packageShare "recolect.exe"
-
-if (-not (Test-Path -LiteralPath $NewExeSource)) {
-    throw "Source exe not found on share: $NewExeSource"
+if ([string]::IsNullOrWhiteSpace($PackageSubPath)) {
+    throw 'PackageSubPath is required.'
 }
 
-Write-Host "Source EXE: $NewExeSource"
-Write-Host "Dest   EXE: $TargetExePath"
-Write-Host "Backup Dir: $BackupDir"
+$packageShare = Join-Path $packageShareBase $PackageSubPath
+$fileMap = Parse-FileMappings -Mappings $FileMappings
+
+if (-not $fileMap -or $fileMap.Count -eq 0) {
+    Write-Warning 'No file mappings provided for BATCH. Skipping deployment.'
+    exit 0
+}
+
+$batServer = $Region + $EnvPrefix + 'TBAT-' + $PodId + '01' + $domain
+Write-Host "Batch Server: $batServer"
+Write-Host "Package Share: $packageShare"
+
+$resolvedMap = @()
+foreach ($item in $fileMap) {
+    $sourceFile = Join-Path $packageShare $item.SourceFileName
+    if (-not (Test-Path -LiteralPath $sourceFile)) {
+        throw "Source file not found on share: $sourceFile"
+    }
+
+    $resolvedMap += [PSCustomObject]@{
+        SourcePath = $sourceFile
+        DestinationPath = $item.DestinationPath
+    }
+}
 
 try {
-    Invoke-Command -ComputerName $batServer `
-        -Credential $Credentials `
-        -Authentication CredSSP `
-        -UseSSL `
-        -ArgumentList $NewExeSource, $TargetExePath, $BackupDir `
-        -ErrorAction Stop `
-        -ScriptBlock {
+    Invoke-Command -ComputerName $batServer -Credential $Credentials -Authentication CredSSP -UseSSL -ArgumentList $resolvedMap, $BackupDir -ErrorAction Stop -ScriptBlock {
+        param(
+            [object[]]$ResolvedMap,
+            [string]$BackupDir
+        )
 
-            param(
-                [string]$SourceExe,
-                [string]$DestExe,
-                [string]$BackupDir
-            )
+        function Write-Log($msg) {
+            $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            Write-Host "[$env:COMPUTERNAME][$ts] $msg"
+        }
 
-            function Write-Log($msg) {
-                $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                Write-Host "[$env:COMPUTERNAME][$ts] $msg"
-            }
+        foreach ($file in $ResolvedMap) {
+            $source = $file.SourcePath
+            $dest = $file.DestinationPath
 
-            Write-Log "Source: $SourceExe"
-            Write-Log "Dest:   $DestExe"
+            Write-Log "Source: $source"
+            Write-Log "Dest:   $dest"
 
-            if (-not (Test-Path -LiteralPath $SourceExe)) { throw "Source not accessible: $SourceExe" }
-            if (-not (Test-Path -LiteralPath $DestExe))   { throw "Destination not found: $DestExe" }
+            if (-not (Test-Path -LiteralPath $source)) { throw "Source not accessible: $source" }
+            if (-not (Test-Path -LiteralPath $dest))   { throw "Destination not found: $dest" }
 
-            # Stop process if running (best-effort)
-            $procName = [IO.Path]::GetFileNameWithoutExtension($DestExe)
+            $procName = [IO.Path]::GetFileNameWithoutExtension($dest)
             $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
             if ($procs) {
                 Write-Log "Stopping process: $procName"
@@ -90,28 +126,23 @@ try {
                 Write-Log "Created backup dir: $BackupDir"
             }
 
-            $timestamp  = Get-Date -Format "yyyyMMdd_HHmmss"
-            $destName   = [IO.Path]::GetFileName($DestExe)
+            $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+            $destName = [IO.Path]::GetFileName($dest)
             $backupPath = Join-Path $BackupDir "$destName.$timestamp.bak"
 
-            Write-Log "Backing up current EXE to: $backupPath"
-            Copy-Item -LiteralPath $DestExe -Destination $backupPath -Force -ErrorAction Stop
+            Copy-Item -LiteralPath $dest -Destination $backupPath -Force -ErrorAction Stop
 
-            $srcHash = (Get-FileHash -LiteralPath $SourceExe -Algorithm SHA256).Hash
-            Write-Log "SHA256 source: $srcHash"
-
-            Write-Log "Copying new EXE..."
-            Copy-Item -LiteralPath $SourceExe -Destination $DestExe -Force -ErrorAction Stop
-
-            $dstHash = (Get-FileHash -LiteralPath $DestExe -Algorithm SHA256).Hash
-            Write-Log "SHA256 dest:   $dstHash"
+            $srcHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+            Copy-Item -LiteralPath $source -Destination $dest -Force -ErrorAction Stop
+            $dstHash = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
 
             if ($dstHash -ne $srcHash) {
-                throw "Hash verification failed: destination does not match source."
+                throw "Hash verification failed: destination does not match source for $dest"
             }
 
-            Write-Log "recolect.exe replacement successful."
+            Write-Log "Updated successfully: $dest"
         }
+    }
 
     Write-Host "Done on $batServer"
 }

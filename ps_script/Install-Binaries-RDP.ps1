@@ -4,100 +4,139 @@ param(
     [ValidateSet('Dev','Test','Prod')][string]$Env,
     [string]$PodId,
     [string]$User,
-    [String]$Password
+    [String]$Password,
+    [string]$PackageSubPath,
+    [string]$FileMappings,
+    [string]$BackupDir = 'D:\Apps\Backup_exe'
 )
 
 $ScriptDirectory = Split-Path -Path $MyInvocation.MyCommand.Definition -Parent
 try {
-    write-host "$ScriptDirectory\shared_functions.ps1"
     . ("$ScriptDirectory\shared_functions.ps1")
-    
 }catch{
-    write-host "Import of shared_functions.ps1 failed!"
+    Write-Host "Import of shared_functions.ps1 failed!"
+}
+
+function Parse-FileMappings {
+    param([string]$Mappings)
+
+    if ([string]::IsNullOrWhiteSpace($Mappings)) {
+        return @()
+    }
+
+    if ($Mappings.Trim().ToUpperInvariant() -in @('SKIP','NONE','N/A','NA')) {
+        return @()
+    }
+
+    $parsed = @()
+    foreach ($entry in ($Mappings -split ';')) {
+        $trimmed = $entry.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+
+        $parts = $trimmed -split '\|', 2
+        if ($parts.Count -ne 2 -or [string]::IsNullOrWhiteSpace($parts[0]) -or [string]::IsNullOrWhiteSpace($parts[1])) {
+            throw "Invalid mapping format '$trimmed'. Use: sourceFileName|fullDestinationPath"
+        }
+
+        $parsed += [PSCustomObject]@{
+            SourceFileName = $parts[0].Trim()
+            DestinationPath = $parts[1].Trim()
+        }
+    }
+
+    return $parsed
 }
 
 $SecurePassword = $Password | ConvertTo-SecureString -AsPlainText -Force
 $Credentials = New-Object System.Management.Automation.PSCredential -ArgumentList $User, $SecurePassword
 
 switch ($Env) {
-    'Prod' { 
+    'Prod' {
         $domain = '.cloud.trintech.host'
         $AppServerCount = 5
-        $packageShare = "\\cloud\NETLOGON\cloud_files\Frontier\Frontier_Release\2025_1\Frontier Install Packages\RDP\" # Adjust as needed
+        $packageShareBase = '\\cloud\NETLOGON\cloud_files'
     }
     'Test' {
         $domain = '.cloud.trintech.host'
         $AppServerCount = 3
-        $packageShare = "\\cloud\NETLOGON\cloud_files\Frontier\Frontier_Release\2025_1\Frontier Install Packages\RDP\" # Adjust as needed
+        $packageShareBase = '\\cloud\NETLOGON\cloud_files'
     }
     'Dev' {
         $domain = '.lower.trintech.host'
         $AppServerCount = 2
-        $packageShare = "\\Lower\NETLOGON\cloud_files\Frontier\Frontier_Release\2025_1\Frontier Install Packages\RDP\"
+        $packageShareBase = '\\Lower\NETLOGON\cloud_files'
     }
     default { throw "Selected environment type doesn't exist!" }
 }
-$suffix = "ZZ"
-$appServers = foreach ($i in 1..$AppServerCount) {
 
+if ([string]::IsNullOrWhiteSpace($PackageSubPath)) {
+    throw 'PackageSubPath is required.'
+}
+
+$packageShare = Join-Path $packageShareBase $PackageSubPath
+$fileMap = Parse-FileMappings -Mappings $FileMappings
+
+if (-not $fileMap -or $fileMap.Count -eq 0) {
+    Write-Warning 'No file mappings provided for RDP. Skipping deployment.'
+    exit 0
+}
+
+$suffix = 'ZZ'
+$appServers = foreach ($i in 1..$AppServerCount) {
     if ($Region -eq 'USR2') {
-        "{0}{1}TAPP-{2}01{3}" -f $Region, $EnvPrefix, ("{0:D2}" -f $i), $domain
+        '{0}{1}TAPP-{2}01{3}' -f $Region, $EnvPrefix, ('{0:D2}' -f $i), $domain
     }
     else {
-        "{0}{1}TAPP-{2}{3:D2}{4}" -f $Region, $EnvPrefix, $suffix, $i, $domain
+        '{0}{1}TAPP-{2}{3:D2}{4}' -f $Region, $EnvPrefix, $suffix, $i, $domain
     }
 }
 
-Write-Host "App Servers: $($appServers -join ', ')`n"
+Write-Host "App Servers: $($appServers -join ', ')"
+Write-Host "Package Share: $packageShare"
 
-$TargetExePath = 'D:\Apps\Frontier\RpsWin2\recolect.exe'   
-$BackupDir     = 'D:\Apps\Backup_exe'        
-$NewExeSource  = Join-Path $packageShare 'recolect.exe' 
+$resolvedMap = @()
+foreach ($item in $fileMap) {
+    $sourceFile = Join-Path $packageShare $item.SourceFileName
+    if (-not (Test-Path -LiteralPath $sourceFile)) {
+        throw "Source file not found on share: $sourceFile"
+    }
 
-Write-Host "New EXE source: $NewExeSource"
-Write-Host "Target EXE path: $TargetExePath"
-Write-Host "Backup dir:      $BackupDir`n"
-
-# validation before remoting
-if (-not (Test-Path -LiteralPath $NewExeSource)) {
-    throw "New EXE not found on share: $NewExeSource"
+    $resolvedMap += [PSCustomObject]@{
+        SourcePath = $sourceFile
+        DestinationPath = $item.DestinationPath
+    }
 }
 
 foreach ($server in $appServers) {
-    Write-Host "`n==== Installing Binaries and PreReqs on $server ===="
+    Write-Host "`n==== Deploying files on $server ===="
     try {
-        Invoke-Command -ComputerName $server -Credential $Credentials -Authentication CredSSP -UseSSL -ArgumentList $NewExeSource, $TargetExePath, $BackupDir -ErrorAction Stop -ScriptBlock {
+        Invoke-Command -ComputerName $server -Credential $Credentials -Authentication CredSSP -UseSSL -ArgumentList $resolvedMap, $BackupDir -ErrorAction Stop -ScriptBlock {
+            param(
+                [object[]]$ResolvedMap,
+                [string]$BackupDir
+            )
 
-                param(
-                    [string]$SourceExe,
-                    [string]$DestExe,
-                    [string]$BackupDir
-                )
+            function Write-Log($msg) {
+                $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                Write-Host "[$env:COMPUTERNAME][$ts] $msg"
+            }
 
-                function Write-Log($msg) {
-                    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                    Write-Host "[$env:COMPUTERNAME][$ts] $msg"
-                }
+            foreach ($file in $ResolvedMap) {
+                $source = $file.SourcePath
+                $dest = $file.DestinationPath
 
-                Write-Log "Source: $SourceExe"
-                Write-Log "Dest:   $DestExe"
+                Write-Log "Source: $source"
+                Write-Log "Dest:   $dest"
 
-                if (-not (Test-Path -LiteralPath $SourceExe)) {
-                    throw "Source EXE not found (share/path not accessible from this server): $SourceExe"
-                }
-                if (-not (Test-Path -LiteralPath $DestExe)) {
-                    throw "Destination EXE not found: $DestExe"
-                }
+                if (-not (Test-Path -LiteralPath $source)) { throw "Source file not accessible: $source" }
+                if (-not (Test-Path -LiteralPath $dest))   { throw "Destination file not found: $dest" }
 
-                # stop process if it locks the exe
-                $procName = [IO.Path]::GetFileNameWithoutExtension($DestExe)
+                $procName = [IO.Path]::GetFileNameWithoutExtension($dest)
                 $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
                 if ($procs) {
                     Write-Log "Stopping process: $procName"
                     $procs | Stop-Process -Force
                     Start-Sleep -Seconds 2
-                } else {
-                    Write-Log "Process not running: $procName"
                 }
 
                 if (-not (Test-Path -LiteralPath $BackupDir)) {
@@ -105,35 +144,27 @@ foreach ($server in $appServers) {
                     Write-Log "Created backup dir: $BackupDir"
                 }
 
-                $timestamp   = Get-Date -Format "yyyyMMdd_HHmmss"
-                $destName    = [IO.Path]::GetFileName($DestExe)
-                $backupPath  = Join-Path $BackupDir "$destName.$timestamp.bak"
+                $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+                $destName = [IO.Path]::GetFileName($dest)
+                $backupPath = Join-Path $BackupDir "$destName.$timestamp.bak"
 
-                Write-Log "Backing up current EXE to: $backupPath"
-                Copy-Item -LiteralPath $DestExe -Destination $backupPath -Force -ErrorAction Stop
+                Copy-Item -LiteralPath $dest -Destination $backupPath -Force -ErrorAction Stop
 
-                $srcHash  = (Get-FileHash -LiteralPath $SourceExe -Algorithm SHA256).Hash
-                
-                Write-Log "SHA256 source: $srcHash"
-                Write-Log "SHA256 dest (before): $dstHash0"
+                $srcHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+                Copy-Item -LiteralPath $source -Destination $dest -Force -ErrorAction Stop
+                $dstHash = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
 
-                Write-Log "Copying new EXE into place..."
-                Copy-Item -LiteralPath $SourceExe -Destination $DestExe -Force -ErrorAction Stop
-
-                $dstHash1 = (Get-FileHash -LiteralPath $DestExe -Algorithm SHA256).Hash
-                Write-Log "SHA256 dest (after):  $dstHash1"
-
-                if ($dstHash1 -ne $srcHash) {
-                    throw "Hash verification failed: destination does not match source."
+                if ($dstHash -ne $srcHash) {
+                    throw "Hash verification failed for $dest"
                 }
 
-                Write-Log "Replacement successful."
+                Write-Log "Updated successfully: $dest"
             }
+        }
 
         Write-Host "Done on $server"
     }
     catch {
         Write-Host "Failed on $server : $($_.Exception.Message)"
-        continue
     }
 }

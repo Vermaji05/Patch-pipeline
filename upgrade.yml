@@ -63,7 +63,28 @@ parameters:
 
   - name: DoStartServices
     type: boolean
-    default: true    
+    default: true
+
+
+  - name: PackageSubPath
+    type: string
+    default: 'Frontier\Frontier_Release\2025_1\Frontier Install Packages\RDP'
+    displayName: Relative NETLOGON package path
+
+  - name: RdpFileMappings
+    type: string
+    default: "SKIP"
+    displayName: RDP file mappings (source|destination;source|destination)
+
+  - name: WebFileMappings
+    type: string
+    default: "SKIP"
+    displayName: WEB file mappings (source|destination;source|destination)
+
+  - name: BatchFileMappings
+    type: string
+    default: "SKIP"
+    displayName: BATCH file mappings (source|destination;source|destination)
 
 variables:
   - name: KeyVault
@@ -134,12 +155,12 @@ jobs:
           d:/apps/spring_cloud_pipeline_client/bin/SpringCloudPipelineClient.exe --Dir  $(System.DefaultWorkingDirectory) --Uri ${{ variables.springConfigServerUrl }} --Name frontier --Env templates  --Label main --Username user  --Password password  --VaultName ${{ variables.KeyVault }} --TenantId a6990654-25eb-4d90-9f25-a558d2bf582f  --ClientId  $(KeyVault.ClientId)  --ClientSecret $(KeyVault.ClientSecret) --Envvariables Common.* --Verbose
         displayName: Read variables from ${{variables.springConfigServerUrl}} 
       - task: PowerShell@2
-        condition: and(succeeded(), eq(${{ parameters.DoStopServices }}, true))
+        condition: and(succeeded(), eq(${{ parameters.DoStopServices }}, true), or(eq(${{ parameters.DoDeployWeb }}, true), eq(${{ parameters.DoDeployBatch }}, true)))
         displayName: 'Stopping all services on ${{ parameters.PODId }}'
         inputs:
           targetType: filePath
           filePath: $(System.DefaultWorkingDirectory)/ps_script/Stop-Service.ps1
-          arguments: '-user $(Admin.Username) -password ''$(Admin.Password)'' -region ${{ variables.region }} -envprefix ${{ variables.envprefix }} -env ${{ parameters.InputEnvironment }} -PodId ''${{ parameters.PODId }}'''
+          arguments: '-user $(Admin.Username) -password ''$(Admin.Password)'' -region ${{ variables.region }} -envprefix ${{ variables.envprefix }} -env ${{ parameters.InputEnvironment }} -PodId ''${{ parameters.PODId }}'' -ManageWebServices ${{ parameters.DoDeployWeb }} -ManageBatchServices ${{ parameters.DoDeployBatch }}'
       
       - task: PowerShell@2
         condition: and(succeeded(), eq(${{ parameters.DoDeployRdp }}, true))
@@ -147,7 +168,7 @@ jobs:
         inputs:
           targetType: filePath
           filePath: $(System.DefaultWorkingDirectory)/ps_script/Install-Binaries-RDP.ps1
-          arguments: '-user $(Admin.Username) -password ''$(Admin.Password)'' -region ${{ variables.region }} -envprefix ${{ variables.envprefix }} -env ${{ parameters.InputEnvironment }} -PodId ''${{ parameters.PODId }}'''
+          arguments: '-user $(Admin.Username) -password ''$(Admin.Password)'' -region ${{ variables.region }} -envprefix ${{ variables.envprefix }} -env ${{ parameters.InputEnvironment }} -PodId ''${{ parameters.PODId }}'' -PackageSubPath ''${{ parameters.PackageSubPath }}'' -FileMappings ''${{ parameters.RdpFileMappings }}'''
 
       - task: PowerShell@2
         condition: and(succeeded(), eq(${{ parameters.DoDeployWeb }}, true))
@@ -155,7 +176,7 @@ jobs:
         inputs:
           targetType: filePath
           filePath: $(System.DefaultWorkingDirectory)/ps_script/Install-Binaries-WEB.ps1
-          arguments: '-user $(Admin.Username) -password ''$(Admin.Password)'' -region ${{ variables.region }} -envprefix ${{ variables.envprefix }} -env ${{ parameters.InputEnvironment }} -PodId ''${{ parameters.PODId }}''' 
+          arguments: '-user $(Admin.Username) -password ''$(Admin.Password)'' -region ${{ variables.region }} -envprefix ${{ variables.envprefix }} -env ${{ parameters.InputEnvironment }} -PodId ''${{ parameters.PODId }}'' -PackageSubPath ''${{ parameters.PackageSubPath }}'' -FileMappings ''${{ parameters.WebFileMappings }}'''
       
       - task: PowerShell@2
         condition: and(succeeded(), eq(${{ parameters.DoDeployBatch }}, true))
@@ -163,13 +184,13 @@ jobs:
         inputs:
           targetType: filePath
           filePath: $(System.DefaultWorkingDirectory)/ps_script/Install-Binaries-BAT.ps1
-          arguments: '-user $(Admin.Username) -password ''$(Admin.Password)'' -region ${{ variables.region }} -envprefix ${{ variables.envprefix }} -env ${{ parameters.InputEnvironment }} -PodId ''${{ parameters.PODId }}'''     
+          arguments: '-user $(Admin.Username) -password ''$(Admin.Password)'' -region ${{ variables.region }} -envprefix ${{ variables.envprefix }} -env ${{ parameters.InputEnvironment }} -PodId ''${{ parameters.PODId }}'' -PackageSubPath ''${{ parameters.PackageSubPath }}'' -FileMappings ''${{ parameters.BatchFileMappings }}'''
       
       - task: PowerShell@2
-        condition: and(succeeded(), eq(${{ parameters.DoStartServices }}, true))
+        condition: and(succeeded(), eq(${{ parameters.DoStartServices }}, true), or(eq(${{ parameters.DoDeployWeb }}, true), eq(${{ parameters.DoDeployBatch }}, true)))
         displayName: 'Starting all services on ${{ parameters.PODId }}'
         inputs:
           targetType: filePath
           filePath: $(System.DefaultWorkingDirectory)/ps_script/Start-Service.ps1
-          arguments: '-user $(Admin.Username) -password ''$(Admin.Password)'' -region ${{ variables.region }} -envprefix ${{ variables.envprefix }} -env ${{ parameters.InputEnvironment }} -PodId ''${{ parameters.PODId }}'''    
+          arguments: '-user $(Admin.Username) -password ''$(Admin.Password)'' -region ${{ variables.region }} -envprefix ${{ variables.envprefix }} -env ${{ parameters.InputEnvironment }} -PodId ''${{ parameters.PODId }}'' -ManageWebServices ${{ parameters.DoDeployWeb }} -ManageBatchServices ${{ parameters.DoDeployBatch }}'
       
