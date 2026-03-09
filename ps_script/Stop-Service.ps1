@@ -5,8 +5,8 @@ param(
     [string]$PodId,
     [string]$User,
     [String]$Password,
-    [bool]$ManageWebServices = $true,
-    [bool]$ManageBatchServices = $true
+    [object]$ManageWebServices = $true,
+    [object]$ManageBatchServices = $true
 )
 
 $ScriptDirectory = Split-Path -Path $MyInvocation.MyCommand.Definition -Parent
@@ -15,6 +15,26 @@ try {
 }catch{
     Write-Host "Import of shared_functions.ps1 failed!"
 }
+
+
+function ConvertTo-Bool {
+    param([object]$Value, [bool]$Default = $false)
+
+    if ($null -eq $Value) { return $Default }
+    if ($Value -is [bool]) { return $Value }
+
+    $text = $Value.ToString().Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) { return $Default }
+
+    switch -Regex ($text.ToLowerInvariant()) {
+        '^(true|1|yes|y)$' { return $true }
+        '^(false|0|no|n)$' { return $false }
+        default { throw "Invalid boolean value '$Value'. Use True/False or 1/0." }
+    }
+}
+
+$ManageWebServices = ConvertTo-Bool -Value $ManageWebServices -Default $true
+$ManageBatchServices = ConvertTo-Bool -Value $ManageBatchServices -Default $true
 
 if (-not $ManageWebServices -and -not $ManageBatchServices) {
     Write-Host 'No web/batch service management requested. Skipping stop-services.'
