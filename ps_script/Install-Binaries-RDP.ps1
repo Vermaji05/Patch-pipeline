@@ -94,6 +94,8 @@ $appServers = foreach ($i in 1..$AppServerCount) {
 Write-Host "App Servers: $($appServers -join ', ')"
 Write-Host "Package Share: $packageShare"
 
+$hasFailures = $false
+
 $resolvedMap = @()
 foreach ($item in $fileMap) {
     $sourceFile = Join-Path $packageShare $item.SourceFileName
@@ -129,7 +131,13 @@ foreach ($server in $appServers) {
                 Write-Log "Dest:   $dest"
 
                 if (-not (Test-Path -LiteralPath $source)) { throw "Source file not accessible: $source" }
-                if (-not (Test-Path -LiteralPath $dest))   { throw "Destination file not found: $dest" }
+                $destDir = Split-Path -Path $dest -Parent
+                if (-not [string]::IsNullOrWhiteSpace($destDir) -and -not (Test-Path -LiteralPath $destDir)) {
+                    New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                    Write-Log "Created destination directory: $destDir"
+                }
+
+                $destinationExists = Test-Path -LiteralPath $dest
 
                 $procName = [IO.Path]::GetFileNameWithoutExtension($dest)
                 $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
@@ -144,13 +152,18 @@ foreach ($server in $appServers) {
                     Write-Log "Created backup dir: $BackupDir"
                 }
 
-                $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-                $destName = [IO.Path]::GetFileName($dest)
-                $backupPath = Join-Path $BackupDir "$destName.$timestamp.bak"
-
-                Copy-Item -LiteralPath $dest -Destination $backupPath -Force -ErrorAction Stop
-
                 $srcHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+
+                if ($destinationExists) {
+                    $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+                    $destName = [IO.Path]::GetFileName($dest)
+                    $backupPath = Join-Path $BackupDir "$destName.$timestamp.bak"
+                    Copy-Item -LiteralPath $dest -Destination $backupPath -Force -ErrorAction Stop
+                }
+                else {
+                    Write-Log "Destination file does not exist. A new file will be created: $dest"
+                }
+
                 Copy-Item -LiteralPath $source -Destination $dest -Force -ErrorAction Stop
                 $dstHash = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
 
@@ -166,5 +179,10 @@ foreach ($server in $appServers) {
     }
     catch {
         Write-Host "Failed on $server : $($_.Exception.Message)"
+        $hasFailures = $true
     }
+}
+
+if ($hasFailures) {
+    throw 'One or more RDP servers failed during deployment.'
 }

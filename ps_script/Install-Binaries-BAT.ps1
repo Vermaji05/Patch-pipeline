@@ -111,7 +111,13 @@ try {
             Write-Log "Dest:   $dest"
 
             if (-not (Test-Path -LiteralPath $source)) { throw "Source not accessible: $source" }
-            if (-not (Test-Path -LiteralPath $dest))   { throw "Destination not found: $dest" }
+            $destDir = Split-Path -Path $dest -Parent
+            if (-not [string]::IsNullOrWhiteSpace($destDir) -and -not (Test-Path -LiteralPath $destDir)) {
+                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                Write-Log "Created destination directory: $destDir"
+            }
+
+            $destinationExists = Test-Path -LiteralPath $dest
 
             $procName = [IO.Path]::GetFileNameWithoutExtension($dest)
             $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
@@ -126,13 +132,18 @@ try {
                 Write-Log "Created backup dir: $BackupDir"
             }
 
-            $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-            $destName = [IO.Path]::GetFileName($dest)
-            $backupPath = Join-Path $BackupDir "$destName.$timestamp.bak"
-
-            Copy-Item -LiteralPath $dest -Destination $backupPath -Force -ErrorAction Stop
-
             $srcHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+
+            if ($destinationExists) {
+                $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+                $destName = [IO.Path]::GetFileName($dest)
+                $backupPath = Join-Path $BackupDir "$destName.$timestamp.bak"
+                Copy-Item -LiteralPath $dest -Destination $backupPath -Force -ErrorAction Stop
+            }
+            else {
+                Write-Log "Destination file does not exist. A new file will be created: $dest"
+            }
+
             Copy-Item -LiteralPath $source -Destination $dest -Force -ErrorAction Stop
             $dstHash = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
 
@@ -148,4 +159,5 @@ try {
 }
 catch {
     Write-Host "Failed on $batServer : $($_.Exception.Message)"
+    throw
 }
